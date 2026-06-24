@@ -232,7 +232,10 @@ def process_chat_request(text: str, soul: str, summary: str, project_path: str) 
                 result = run_cli(
                     cmd,
                     capture_output=True, text=True, timeout=attempt_timeout,
-                    cwd=project_path or str(KOAN_ROOT),
+                    # Run from KOAN_ROOT, not the project cwd: Claude takes a
+                    # per-cwd session lock, so chatting from the project dir
+                    # while a mission runs there collides and exits non-zero.
+                    cwd=str(KOAN_ROOT),
                 )
                 response = clean_chat_response(result.stdout.strip(), text)
 
