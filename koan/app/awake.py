@@ -604,7 +604,14 @@ def _route_to_chat_process(text: str) -> bool:
 
     from app.chat_process import write_to_inbox
 
-    write_to_inbox(text)
+    # Treat enqueue as best-effort: if the write fails (process died between
+    # the PID check and the write, full disk, permissions), report failure so
+    # the caller falls back to inline handling rather than silently dropping
+    # the user's message.
+    if not write_to_inbox(text):
+        log("chat", "Chat inbox write failed — falling back to inline handler")
+        return False
+
     log("chat", "Chat routed to dedicated chat process")
     return True
 

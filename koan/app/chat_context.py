@@ -38,6 +38,7 @@ def build_chat_prompt(
     from app.conversation_history import load_recent_history, format_conversation_history
     from app.language_preference import get_language_instruction
     from app.config import get_chat_tools, get_tools_description
+    from app.run_log import log_safe
     from app.signals import PAUSE_FILE, STOP_FILE
 
     # Load recent conversation history
@@ -70,8 +71,8 @@ def build_chat_prompt(
                 pending_context = "Live progress (pending.md, last entries):\n...\n" + pending_content[-1500:]
             else:
                 pending_context = "Live progress (pending.md):\n" + pending_content
-        except OSError:
-            pass
+        except OSError as e:
+            log_safe("warning", f"Could not read pending.md for chat context: {e}")
 
     # Load current mission state (live sync with run loop)
     missions_context = ""
@@ -81,7 +82,8 @@ def build_chat_prompt(
         from app.missions import parse_sections
         try:
             sections = parse_sections(missions_file.read_text())
-        except OSError:
+        except OSError as e:
+            log_safe("warning", f"Could not read missions.md for chat context: {e}")
             sections = {}
         in_progress = sections.get("in_progress", [])
         pending = sections.get("pending", [])

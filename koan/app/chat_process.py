@@ -18,6 +18,7 @@ Architecture:
 See issue #1084 for motivation.
 """
 
+import contextlib
 import fcntl
 import json
 import os
@@ -97,10 +98,8 @@ def read_and_clear_inbox() -> list:
                 for line in f:
                     line = line.strip()
                     if line:
-                        try:
+                        with contextlib.suppress(json.JSONDecodeError):
                             entries.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
                 # Always truncate after reading — even if no valid entries
                 # were parsed — to prevent malformed lines from accumulating.
                 f.seek(0)
@@ -114,10 +113,12 @@ def read_and_clear_inbox() -> list:
     return entries
 
 
-def write_to_inbox(text: str) -> None:
+def write_to_inbox(text: str) -> bool:
     """Append a chat request to the inbox file (called from awake.py).
 
-    Uses file locking for safe concurrent access.
+    Uses file locking for safe concurrent access. Returns True if the
+    request was durably written, False on I/O failure so the caller can
+    fall back to inline handling instead of silently dropping the message.
     """
     entry = json.dumps({
         "text": text,
@@ -133,6 +134,8 @@ def write_to_inbox(text: str) -> None:
                 fcntl.flock(f, fcntl.LOCK_UN)
     except OSError as e:
         print(f"[chat] Failed to write to inbox: {e}", file=sys.stderr)
+        return False
+    return True
 
 
 def has_pending_requests() -> bool:
