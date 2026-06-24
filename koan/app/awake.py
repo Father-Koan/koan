@@ -743,6 +743,51 @@ def _ensure_runner_alive() -> None:
         log("error", f"Failed to start runner: {msg}")
 
 
+# Watchdog state for the dedicated chat process. We only respawn a chat
+# process that has been observed alive at least once this session, so running
+# the bridge standalone (e.g. `make awake`, without a chat process) never
+# spuriously launches one. Respawn attempts are throttled so a chat process
+# that crash-loops on startup is not hammered every poll cycle.
+_chat_seen_alive = False
+_chat_last_respawn = 0.0
+CHAT_RESPAWN_THROTTLE = 30.0
+
+
+def _ensure_chat_alive() -> None:
+    """Respawn the dedicated chat process if it has crashed.
+
+    Analogous to ``_ensure_runner_alive()`` but called every poll cycle. A chat
+    process that dies *after* a message lands in ``chat-inbox.jsonl`` would
+    otherwise leave that already-queued message unanswered until the next
+    ``make start``/``start_all`` (future messages fall back to the worker
+    thread, but the backlog entry is stranded). Restarting the chat process
+    lets it drain its inbox backlog within the current session.
+    """
+    global _chat_seen_alive, _chat_last_respawn
+    from app.pid_manager import check_pidfile, start_chat
+
+    if check_pidfile(KOAN_ROOT, "chat"):
+        _chat_seen_alive = True
+        return
+
+    # Never seen alive this session — the bridge may be running standalone
+    # without a chat process, so don't spawn one unprompted.
+    if not _chat_seen_alive:
+        return
+
+    now = time.monotonic()
+    if now - _chat_last_respawn < CHAT_RESPAWN_THROTTLE:
+        return
+    _chat_last_respawn = now
+
+    log("init", "Chat process not running — respawning to drain inbox backlog")
+    ok, msg = start_chat(KOAN_ROOT)
+    if ok:
+        log("init", f"Chat process started: {msg}")
+    else:
+        log("error", f"Failed to start chat process: {msg}")
+
+
 MAX_BRIDGE_CRASHES = 5
 BRIDGE_BACKOFF_MULTIPLIER = 10
 MAX_BRIDGE_BACKOFF = 60
@@ -946,6 +991,13 @@ def _bridge_loop():
                 write_heartbeat(str(KOAN_ROOT))
             except Exception as e:
                 log("error", f"write_heartbeat failed: {e}")
+
+            # Self-heal a crashed chat process so any messages already queued
+            # in chat-inbox.jsonl get drained instead of waiting for a restart.
+            try:
+                _ensure_chat_alive()
+            except Exception as e:
+                log("error", f"_ensure_chat_alive failed: {e}")
 
             # Check for restart signal (set by /restart command).
             # Only react to files created AFTER we started — stale files

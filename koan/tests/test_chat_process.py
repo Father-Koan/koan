@@ -139,6 +139,58 @@ class TestChatRouting:
         assert json.loads(lines[1])["text"] == "second message"
 
 
+class TestChatWatchdog:
+    """The bridge respawns a crashed chat process so its inbox backlog drains."""
+
+    def _reset_state(self, monkeypatch):
+        import app.awake as awake
+        monkeypatch.setattr(awake, "_chat_seen_alive", False)
+        monkeypatch.setattr(awake, "_chat_last_respawn", 0.0)
+        return awake
+
+    def test_respawns_after_chat_crash(self, monkeypatch):
+        """Once seen alive, a vanished chat pidfile triggers start_chat()."""
+        awake = self._reset_state(monkeypatch)
+        calls = []
+        monkeypatch.setattr("app.pid_manager.start_chat", lambda root: (calls.append(root) or (True, "started")))
+
+        # First cycle: chat is alive — watchdog records it, does not respawn.
+        monkeypatch.setattr("app.pid_manager.check_pidfile", lambda root, name: 1234)
+        awake._ensure_chat_alive()
+        assert calls == []
+
+        # Chat crashes: pidfile gone — watchdog respawns it.
+        monkeypatch.setattr("app.pid_manager.check_pidfile", lambda root, name: None)
+        awake._ensure_chat_alive()
+        assert len(calls) == 1
+
+    def test_no_respawn_when_never_seen_alive(self, monkeypatch):
+        """A bridge running without a chat process must not spawn one."""
+        awake = self._reset_state(monkeypatch)
+        calls = []
+        monkeypatch.setattr("app.pid_manager.start_chat", lambda root: (calls.append(root) or (True, "started")))
+        monkeypatch.setattr("app.pid_manager.check_pidfile", lambda root, name: None)
+
+        awake._ensure_chat_alive()
+        assert calls == []
+
+    def test_respawn_is_throttled(self, monkeypatch):
+        """Repeated dead-pidfile cycles only spawn once within the throttle window."""
+        awake = self._reset_state(monkeypatch)
+        calls = []
+        monkeypatch.setattr("app.pid_manager.start_chat", lambda root: (calls.append(root) or (True, "started")))
+
+        # Seen alive once.
+        monkeypatch.setattr("app.pid_manager.check_pidfile", lambda root, name: 1)
+        awake._ensure_chat_alive()
+
+        # Now dead across two consecutive cycles — throttle allows one spawn.
+        monkeypatch.setattr("app.pid_manager.check_pidfile", lambda root, name: None)
+        awake._ensure_chat_alive()
+        awake._ensure_chat_alive()
+        assert len(calls) == 1
+
+
 class TestRetryConstants:
     """Verify retry configuration is sensible."""
 
