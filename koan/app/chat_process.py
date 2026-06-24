@@ -82,35 +82,52 @@ def _resolve_project_path() -> str:
     return ""
 
 
-def read_and_clear_inbox() -> list:
-    """Atomically read all pending chat requests and clear the inbox.
+def pop_next_inbox_entry() -> Optional[dict]:
+    """Atomically remove and return the oldest pending chat request.
 
-    Returns a list of dicts, each with keys: text, timestamp.
+    Reads the inbox under an exclusive lock, removes only the first entry,
+    and rewrites the remaining entries back to the file. Returns the popped
+    entry dict (keys: text, timestamp), or None when the inbox is empty.
+
+    Popping one entry at a time — rather than reading and clearing the whole
+    batch up front — keeps the un-processed tail durable: a graceful shutdown
+    or crash mid-batch leaves entries 2..N in the file for the next poll
+    instead of silently dropping them.
     """
     if not CHAT_INBOX.exists():
-        return []
+        return None
 
-    entries = []
     try:
         with open(CHAT_INBOX, "r+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
+                entries = []
                 for line in f:
                     line = line.strip()
                     if line:
                         with contextlib.suppress(json.JSONDecodeError):
                             entries.append(json.loads(line))
-                # Always truncate after reading — even if no valid entries
-                # were parsed — to prevent malformed lines from accumulating.
+
+                if not entries:
+                    # No valid entries — clear any malformed lines that
+                    # accumulated so they don't pin the inbox open.
+                    f.seek(0)
+                    f.truncate()
+                    f.flush()
+                    return None
+
+                popped = entries.pop(0)
+                # Rewrite the remaining entries (also drops malformed lines).
                 f.seek(0)
                 f.truncate()
+                for entry in entries:
+                    f.write(json.dumps(entry) + "\n")
                 f.flush()
+                return popped
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
     except OSError:
-        pass
-
-    return entries
+        return None
 
 
 def write_to_inbox(text: str) -> bool:
@@ -188,12 +205,24 @@ def process_chat_request(text: str, soul: str, summary: str, project_path: str) 
     # Save user message to history
     save_conversation_message(CONVERSATION_HISTORY_FILE, "user", text)
 
-    # Scan for prompt injection (warn-only — chat tools are read-only)
+    # Scan for prompt injection (warn-only — chat tools are read-only).
+    # Mirror awake.handle_chat: log AND quarantine flagged text so injection
+    # attempts via chat are recorded for human review regardless of which
+    # path (dedicated process vs. fallback worker) handled the message.
     guard_config = get_prompt_guard_config()
     if guard_config["enabled"]:
         guard_result = scan_mission_text(text)
         if guard_result.blocked:
             _log(f"WARNING chat guard: {guard_result.reason} | {text[:100]}")
+            from app.missions import quarantine_mission
+            ok = quarantine_mission(
+                INSTANCE_DIR / "missions-quarantine.md",
+                text,
+                guard_result.reason,
+                source="telegram-chat",
+            )
+            if not ok:
+                _log(f"WARNING chat guard: failed to quarantine flagged message | {guard_result.reason}")
 
     chat_timeout = int(os.environ.get("KOAN_CHAT_TIMEOUT", "180"))
     chat_tools_list = get_chat_tools().split(",")
@@ -325,31 +354,29 @@ def main():
 
     try:
         while not _shutdown_requested:
-            entries = read_and_clear_inbox()
-            if entries:
-                # Reload context each batch so edits to soul.md/summary.md
-                # are picked up without restarting the process.
-                soul = _load_soul()
-                summary = _load_summary()
-                project_path = _resolve_project_path()
+            entry = pop_next_inbox_entry()
+            if entry is None:
+                time.sleep(INBOX_POLL_INTERVAL)
+                continue
 
-            for entry in entries:
-                if _shutdown_requested:
-                    break
-                text = entry.get("text", "").strip()
-                if text:
-                    _log(f"Processing: {text[:60]}...")
+            # Reload context per entry so edits to soul.md/summary.md are
+            # picked up without restarting the process.
+            soul = _load_soul()
+            summary = _load_summary()
+            project_path = _resolve_project_path()
+
+            text = entry.get("text", "").strip()
+            if text:
+                _log(f"Processing: {text[:60]}...")
+                try:
+                    process_chat_request(text, soul, summary, project_path)
+                except Exception as e:
+                    _log(f"Error processing chat: {e}")
                     try:
-                        process_chat_request(text, soul, summary, project_path)
-                    except Exception as e:
-                        _log(f"Error processing chat: {e}")
-                        try:
-                            from app.notify import send_telegram
-                            send_telegram("⚠️ Something went wrong — try again?")
-                        except Exception as notify_err:
-                            print(f"[chat] notification also failed: {notify_err}", file=sys.stderr)
-
-            time.sleep(INBOX_POLL_INTERVAL)
+                        from app.notify import send_telegram
+                        send_telegram("⚠️ Something went wrong — try again?")
+                    except Exception as notify_err:
+                        print(f"[chat] notification also failed: {notify_err}", file=sys.stderr)
     except KeyboardInterrupt:
         pass
     finally:
