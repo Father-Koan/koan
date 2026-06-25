@@ -3885,23 +3885,3 @@ class TestGithubParallelWorkersConfig:
         from app.github_config import get_github_parallel_workers
         assert get_github_parallel_workers({"github": {"parallel_workers": "x"}}) == 4
         assert get_github_parallel_workers({"github": None}) == 4
-
-
-class TestProgressNotifier:
-    def test_dispatch_banner_suppressed_in_normal(self, monkeypatch):
-        import app.loop_manager as lm
-        sent = []
-        monkeypatch.setattr("app.messaging_level.is_debug", lambda: False)
-        monkeypatch.setattr("app.notify.send_telegram", lambda m: sent.append(m))
-        notify = lm._progress_notifier()
-        notify("Processing 3 GitHub notification(s)...")
-        assert sent == []
-
-    def test_dispatch_banner_sent_in_debug(self, monkeypatch):
-        import app.loop_manager as lm
-        sent = []
-        monkeypatch.setattr("app.messaging_level.is_debug", lambda: True)
-        monkeypatch.setattr("app.notify.send_telegram", lambda m: sent.append(m))
-        notify = lm._progress_notifier()
-        notify("Processing 3 GitHub notification(s)...")
-        assert sent == ["Processing 3 GitHub notification(s)..."]

@@ -5460,6 +5460,62 @@ class TestSkillDispatchExceptionFinalization(TestRunSkillMissionEnv):
         mock_finalize.assert_called_once()
         assert mock_finalize.call_args[0][3] == 0  # exit_code=0 on success
 
+    def _dispatch_review(self, tmp_path, *, debug):
+        """Run a successful /review dispatch and return the _notify_mission_end mock."""
+        from app.run import _handle_skill_dispatch
+
+        koan_root = str(tmp_path)
+        instance = str(tmp_path / "instance")
+        (tmp_path / "instance").mkdir()
+        (tmp_path / "instance" / "journal").mkdir(parents=True)
+        (tmp_path / "koan").mkdir()
+
+        mock_proc = self._make_mock_popen(returncode=0, stdout_lines=["ok\n"])
+
+        with patch("app.run.subprocess.Popen", return_value=mock_proc), \
+             patch("app.run._get_koan_branch", return_value="main"), \
+             patch("app.run._restore_koan_branch"), \
+             patch("app.run._reset_terminal"), \
+             patch("app.run.protected_phase", return_value=MagicMock(
+                 __enter__=MagicMock(), __exit__=MagicMock(return_value=False)
+             )), \
+             patch("app.messaging_level.is_debug", return_value=debug), \
+             patch("app.run._notify"), \
+             patch("app.run._notify_mission_end") as mock_notify_end, \
+             patch("app.run._finalize_mission"), \
+             patch("app.run._commit_instance"), \
+             patch("app.run._sleep_between_runs"), \
+             patch("app.run.set_status"), \
+             patch("app.run.log"), \
+             patch("app.skill_dispatch.dispatch_skill_mission",
+                   return_value=["python3", "-m", "app.review_runner"]), \
+             patch("app.mission_runner.run_post_mission"):
+            _handle_skill_dispatch(
+                mission_title="/review https://github.com/o/r/pull/42",
+                project_name="test",
+                project_path=str(tmp_path),
+                koan_root=koan_root,
+                instance=instance,
+                run_num=1,
+                max_runs=20,
+                autonomous_mode="implement",
+                interval=30,
+            )
+        return mock_notify_end
+
+    def test_self_reporting_skill_suppresses_mission_end_in_normal(self, tmp_path):
+        """In normal mode, a self-reporting runner (/review) is the single outcome
+        emitter — the dispatch path must NOT also call _notify_mission_end, so the
+        mission produces exactly one outcome line."""
+        mock_notify_end = self._dispatch_review(tmp_path, debug=False)
+        mock_notify_end.assert_not_called()
+
+    def test_self_reporting_skill_keeps_mission_end_in_debug(self, tmp_path):
+        """In debug mode the verbose mission-end summary still fires alongside the
+        runner's outcome line."""
+        mock_notify_end = self._dispatch_review(tmp_path, debug=True)
+        mock_notify_end.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Skill dispatch auth/quota classification (mirrors regular mission path)

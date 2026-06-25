@@ -24,6 +24,15 @@ from typing import List, Optional
 _MISSION_MAX_RETRIES = 1
 _MISSION_RETRY_DELAY = 10  # seconds
 
+# Skill commands whose runners emit their own single outcome line via
+# messaging_level.notify_outcome() on success (PR #2104). In normal mode the
+# dispatch path suppresses the redundant _notify_mission_end() emit for these so
+# each mission produces exactly one outcome line (carrying the PR/issue URL).
+_SELF_REPORTING_OUTCOME_SKILLS = frozenset({
+    "review", "ultrareview", "rebase", "recreate",
+    "squash", "plan", "check", "ai", "deep",
+})
+
 _last_idle_msg = ""  # dedup consecutive identical idle-wait log lines
 
 
@@ -207,6 +216,19 @@ def _handle_skill_dispatch(
             exit_code == 0
             and "— skipping" in _skill_stdout
         )
+        # Self-reporting runners (PR #2104) emit their own single outcome line
+        # via messaging_level.notify_outcome() on success — the PR/issue URL or
+        # short context. In normal mode, suppress the redundant _notify_mission_end
+        # emit so each mission produces exactly one outcome line. Only on success:
+        # failure paths in some runners (plan/ai) return without an outcome, so the
+        # mission-end failure line must still fire to avoid a silent failure. Debug
+        # mode keeps the verbose mission-end summary alongside the runner outcome.
+        if exit_code == 0 and not _skill_already_notified:
+            from app.messaging_level import is_debug as _ml_is_debug
+            if not _ml_is_debug():
+                from app.skill_dispatch import mission_command_name
+                if mission_command_name(mission_title) in _SELF_REPORTING_OUTCOME_SKILLS:
+                    _skill_already_notified = True
         if not _skill_already_notified:
             # Tracked skills (/review, /fix, /rebase, /plan, /implement) render a
             # concise "✅ [project] 🔍 Reviewed <pr-url>" line. The skill runners

@@ -57,7 +57,6 @@ without rewriting YAML — handy for temporary debugging.
 | Mission failure | sent (short form) | sent with failure context |
 | GitHub/Jira per-mention queue line | log only | sent |
 | GitHub/Jira queued aggregate | `📬 GitHub: N new missions queued.` (when N > 0) | not emitted (per-mention lines already shown) |
-| GitHub notification/dispatch banners (`Processing N notification(s)…`) | log only | sent |
 | Command replies | always | always |
 
 ### Progress vs. outcome (skill runners)
